@@ -206,33 +206,27 @@ def main():
     app.setQuitOnLastWindowClosed(False)
 
     loop = asyncio.new_event_loop()
+    t = threading.Thread(target=lambda: (asyncio.set_event_loop(loop), loop.run_forever()), daemon=True)
 
-    def loop_runner():
-        asyncio.set_event_loop(loop)
-        loop.run_forever()
-
-    t = threading.Thread(target=loop_runner, daemon=True)
     try:
         t.start()
-    except RuntimeError as e:
-        print(f"❌ Failed to start event loop thread: {e}")
-        loop.close()
-        sys.exit(1)
 
-    assistant = InterviewAssistant(loop, app)
-    future = asyncio.run_coroutine_threadsafe(assistant.run(), loop)
+        assistant = InterviewAssistant(loop, app)
+        future = asyncio.run_coroutine_threadsafe(assistant.run(), loop)
 
-    def check_error():
-        if future.done() and future.exception():
-            console.print(f"[red]❌ Fatal error:[/red] {future.exception()}")
-            app.quit()
+        def check_error():
+            if future.done() and future.exception():
+                console.print(f"[red]❌ Fatal error:[/red] {future.exception()}")
+                app.quit()
 
-    error_timer = QTimer()
-    error_timer.timeout.connect(check_error)
-    error_timer.start(1000)
+        error_timer = QTimer()
+        error_timer.timeout.connect(check_error)
+        error_timer.start(1000)
 
-    try:
         sys.exit(app.exec())
+    except RuntimeError as e:
+        console.print(f"[red]❌ Failed to start:[/red] {e}")
+        sys.exit(1)
     finally:
         loop.call_soon_threadsafe(loop.stop)
         t.join(timeout=3)
