@@ -1,0 +1,17 @@
+{
+  "answer_length": "concise",
+  "verbosity": "medium",
+  "format": "structured",
+  "show_transcription": true,
+  "auto_trigger": true,
+  "window_width": 520,
+  "window_height": 420,
+  "transparent": false,
+  "alpha": 0.95,
+  "position": {
+    "x": null,
+    "y": null
+  },
+  "voice_activation_threshold": 0.04,
+  "silence_duration": 2.0
+}
