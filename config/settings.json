@@ -13,5 +13,6 @@
     "y": null
   },
   "voice_activation_threshold": 0.04,
-  "silence_duration": 2.0
+  "silence_duration": 2.0,
+  "audio_mode": "mic"
 }

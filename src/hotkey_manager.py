@@ -2,12 +2,18 @@
 
 import json
 import os
+import sys
 from pynput import keyboard
 from typing import Callable, Dict
 
 
+def _base_dir() -> str:
+    if getattr(sys, 'frozen', False):
+        return os.path.dirname(sys.executable)
+    return os.path.join(os.path.dirname(__file__), "..")
+
+
 class HotkeyManager:
-    """Register and manage global hotkeys"""
 
     def __init__(self):
         self.hotkeys = {}
@@ -15,18 +21,15 @@ class HotkeyManager:
         self._load_hotkeys()
 
     def _load_hotkeys(self):
-        config_path = os.path.join(
-            os.path.dirname(__file__), "..", "config", "hotkeys.json"
-        )
-        with open(config_path) as f:
+        with open(os.path.join(_base_dir(), "config", "hotkeys.json")) as f:
             self.hotkeys = json.load(f)
 
     def register_hotkeys(self, callbacks: Dict[str, Callable]):
-        hotkey_map = {}
-        for action, hotkey_str in self.hotkeys.items():
-            if action in callbacks:
-                hotkey_map[hotkey_str] = callbacks[action]
-
+        hotkey_map = {
+            hotkey_str: callbacks[action]
+            for action, hotkey_str in self.hotkeys.items()
+            if action in callbacks
+        }
         if hotkey_map:
             self.listener = keyboard.GlobalHotKeys(hotkey_map)
             self.listener.start()
@@ -36,12 +39,9 @@ class HotkeyManager:
         if self.listener:
             self.listener.stop()
             self.listener = None
-            print("✓ Unregistered global hotkeys")
 
     def update_hotkey(self, action: str, new_hotkey: str):
         self.hotkeys[action] = new_hotkey
-        config_path = os.path.join(
-            os.path.dirname(__file__), "..", "config", "hotkeys.json"
-        )
-        with open(config_path, "w") as f:
+        path = os.path.join(_base_dir(), "config", "hotkeys.json")
+        with open(path, "w") as f:
             json.dump(self.hotkeys, f, indent=4)

@@ -2,18 +2,49 @@
 
 import asyncio
 import sys
-import json
 import os
+
+# Force UTF-8 stdout/stderr on Windows (fixes emoji/unicode in print())
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+if hasattr(sys.stderr, "reconfigure"):
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+import json
 import threading
-from rich.console import Console
-from rich.panel import Panel
-from rich.markdown import Markdown
-from rich import print as rprint
 
-console = Console()
+# ── Suppress terminal output after startup ────────────────────────────────────
+import io
+_null = open(os.devnull, "w", encoding="utf-8", errors="replace")
 
+def _silence_terminal():
+    sys.stdout = _null
+    sys.stderr = _null
+
+# ── Qt + local imports ────────────────────────────────────────────────────────
 from PyQt6.QtWidgets import QApplication
-from PyQt6.QtCore import QTimer
+from PyQt6.QtCore import QTimer, pyqtSignal, QObject, Qt
+
+
+class _Bridge(QObject):
+    """Thread-safe bridge: emit call_signal from any thread, slot runs on Qt main thread."""
+    call_signal = pyqtSignal(object)
+
+    def __init__(self):
+        super().__init__()
+        self.call_signal.connect(self._run, Qt.ConnectionType.QueuedConnection)
+
+    def _run(self, func):
+        func()
+
+    def post(self, func):
+        self.call_signal.emit(func)
+
+# ── Frozen-exe path helper ────────────────────────────────────────────────────
+def _base_dir() -> str:
+    """Root dir: works both when run as .py and as a PyInstaller .exe."""
+    if getattr(sys, 'frozen', False):
+        return os.path.dirname(sys.executable)
+    return os.path.join(os.path.dirname(__file__), "..")
 
 from audio_processor import AudioProcessor
 from openai_client import OpenAIRealtimeClient
@@ -24,208 +55,268 @@ from token_storage import load_token
 
 
 class InterviewAssistant:
-    """Main application controller"""
 
     def __init__(self, loop: asyncio.AbstractEventLoop, app: QApplication):
         self.loop = loop
         self.app = app
+        self._bridge = _Bridge()
 
-        self.audio = AudioProcessor()
-        # give audio the loop so it can schedule callbacks
+        self._load_settings()
+
+        self.audio = AudioProcessor(
+            mode=self.settings.get("audio_mode", "mic"),
+            threshold=self.settings.get("voice_activation_threshold", 0.04),
+            silence_seconds=self.settings.get("silence_duration", 2.0),
+        )
         self.audio.loop = self.loop
 
         self.openai = OpenAIRealtimeClient()
         self.ui = UIOverlay()
         self.hotkeys = HotkeyManager()
         self.screen_detector = ScreenShareDetector()
-
-        self.is_voice_active = False
         self.current_question = ""
 
-        self._load_settings()
         self._setup()
 
     def _load_settings(self):
-        """Load application settings"""
-        settings_path = os.path.join(
-            os.path.dirname(__file__), "..", "config", "settings.json"
-        )
-        with open(settings_path) as f:
+        path = os.path.join(_base_dir(), "config", "settings.json")
+        with open(path) as f:
             self.settings = json.load(f)
 
     def _setup(self):
-        """Initialize application"""
-        console.print(Panel("🎯 [bold cyan]Interview Assistant Pro[/bold cyan] Starting...", border_style="cyan"))
-
-        # Verify API token
         token = load_token()
         if not token:
-            console.print("[red]❌ No API token found. Run: python src/setup.py[/red]")
+            self.ui.log("❌ No API token found. Run: python src/setup.py")
             sys.exit(1)
 
-        console.print("[green]✓[/green] API token configured")
+        self.ui.log("✓ API token configured")
 
-        # Setup audio callbacks
-        self.audio.on_audio_chunk = self._on_audio_chunk
-        self.audio.on_voice_start = self._on_voice_start
-        self.audio.on_voice_end = self._on_voice_end
+        self.audio.on_audio_chunk  = self._on_audio_chunk
+        self.audio.on_voice_start  = self._on_voice_start
+        self.audio.on_voice_end    = self._on_voice_end
 
-        # Setup OpenAI callbacks
         self.openai.on_transcription = self._on_transcription
-        self.openai.on_answer = self._on_answer
+        self.openai.on_answer        = self._on_answer
+        self.openai.on_error         = self._on_api_error
 
-        # UI callbacks → hotkeys
-        self.ui_callbacks = {
-            "toggle_visibility": self._toggle_visibility,
-            "copy_answer": self._copy_answer,
-            "toggle_voice_input": self._toggle_voice_input,
-            "toggle_dashboard": self._toggle_dashboard,
-        }
+        self.ui.on_mode_change = self._on_mode_change
+        self.ui.on_close = self.shutdown
 
-        self.hotkeys.register_hotkeys(self.ui_callbacks)
+        self.hotkeys.register_hotkeys({
+            "toggle_visibility":   self._toggle_capture_hide,
+            "copy_answer":         self._copy_answer,
+            "toggle_voice_input":  self._toggle_voice_input,
+            "toggle_dashboard":    self._toggle_dashboard,
+        })
 
-        console.print("[green]✓[/green] All systems initialized")
+        self.ui.log("✓ All systems initialized")
 
-    # ---------- Safe UI helper ----------
+    # ── UI thread helper ──────────────────────────────────────────────────────
 
     def _ui_call(self, func):
-        """Run a function on the Qt GUI thread."""
-        QTimer.singleShot(0, func)
+        self._bridge.post(func)
 
-    # ---------- Async callbacks (from audio / OpenAI) ----------
+    # ── Audio / AI callbacks ──────────────────────────────────────────────────
 
     async def _on_audio_chunk(self, audio_base64: str):
-        if self.is_voice_active:
-            await self.openai.send_audio(audio_base64)
+        await self.openai.send_audio(audio_base64)
 
     async def _on_voice_start(self):
-        self.is_voice_active = True
         self._ui_call(lambda: self.ui.update_status("🎤 Listening..."))
-        console.print("[yellow]🎤 Voice started[/yellow]")
+        self._ui_call(lambda: self.ui.log("🔴 Voice detected — recording"))
 
     async def _on_voice_end(self):
-        self.is_voice_active = False
-        self._ui_call(lambda: self.ui.update_status("⏳ Processing..."))
-        console.print("[yellow]🎤 Voice ended[/yellow] → sending to AI")
+        if self.openai._processing:
+            self._ui_call(lambda: self.ui.update_status("⏳ Still processing previous..."))
+            self._ui_call(lambda: self.ui.log("⏭ Skipped — previous answer still processing"))
+        else:
+            self._ui_call(lambda: self.ui.update_status("⏳ Processing..."))
+            self._ui_call(lambda: self.ui.log("⏹ Voice ended — sending to AI"))
         await self.openai.send_turn_end()
 
-    async def _on_transcription(self, transcription: str):
-        self.current_question = transcription
-        self._ui_call(lambda: self.ui.set_transcription(transcription))
-        console.print(Panel(f"[bold yellow]❓ Question[/bold yellow]\n{transcription}", border_style="yellow"))
+    async def _on_transcription(self, text: str):
+        self.current_question = text
+        self._ui_call(lambda: self.ui.set_transcription(text))
+        self._ui_call(lambda: self.ui.log(f"❓ <b>{text}</b>"))
 
     async def _on_answer(self, answer: list):
         text = ""
         for item in answer:
             if item.get("type") == "message":
-                for content in item.get("content", []):
-                    if content.get("type") == "text":
-                        text = content.get("text", "")
-
+                for c in item.get("content", []):
+                    if c.get("type") == "text":
+                        text = c.get("text", "")
         if text:
-            self._ui_call(lambda: self.ui.show_answer(text))
+            t = text  # explicit capture for lambdas
+            self._ui_call(lambda: self.ui.show_answer(t))
             self._ui_call(lambda: self.ui.update_status("✓ Answer ready"))
-            console.print(Panel(Markdown(text), title="[bold green]💡 Answer[/bold green]", border_style="green"))
+            self._ui_call(lambda: self.ui.log("💡 Answer updated"))
 
-    # ---------- Hotkey handlers (called on GUI thread) ----------
+    async def _on_api_error(self, error: str):
+        # Parse retry wait time from 429 message e.g. "try again in 2m15.648s"
+        import re
+        wait_match = re.search(r"try again in (\d+)m([\d.]+)s", error)
+        if not wait_match:
+            wait_match = re.search(r"try again in ([\d.]+)s", error)
+            wait_secs = int(float(wait_match.group(1))) + 1 if wait_match else None
+        else:
+            wait_secs = int(wait_match.group(1)) * 60 + int(float(wait_match.group(2))) + 1
 
-    def _toggle_visibility(self):
-        self.ui.toggle_visibility()
+        if wait_secs:
+            self._ui_call(lambda: self.ui.log(f"⚠️ Rate limited — retrying in {wait_secs}s"))
+            self._ui_call(lambda: self.ui.update_status(f"⏳ Rate limit — wait {wait_secs}s"))
+        else:
+            self._ui_call(lambda: self.ui.log(f"❌ API error: {error[:120]}"))
+            self._ui_call(lambda: self.ui.update_status("❌ API error"))
+
+    # ── Hotkey handlers ───────────────────────────────────────────────────────
+
+    def _toggle_capture_hide(self):
+        """Ctrl+H — toggle screen-capture invisibility. Window stays visible to you."""
+        self._ui_call(self.ui.toggle_capture_hide)
 
     def _copy_answer(self):
         if not self.ui.answer_text:
             return
-
-        def do_copy():
-            clipboard = QApplication.clipboard()
-            clipboard.setText(self.ui.answer_text)
-            self.ui.update_status("✓ Copied to clipboard")
-
-        self._ui_call(do_copy)
+        def _do():
+            QApplication.clipboard().setText(self.ui.answer_text)
+            self.ui.update_status("✓ Copied")
+            self.ui.log("📋 Answer copied to clipboard")
+        self._ui_call(_do)
 
     def _toggle_voice_input(self):
-        if self.is_voice_active:
-            # Stop capture
+        if self.audio.is_running:
             asyncio.run_coroutine_threadsafe(self.audio.stop(), self.loop)
-            self.is_voice_active = False
-            self._ui_call(lambda: self.ui.update_status("🔇 Voice disabled"))
+            self._ui_call(lambda: self.ui.update_status("🔇 Voice paused"))
+            self._ui_call(lambda: self.ui.log("🔇 Voice capture paused"))
         else:
-            # Start capture
             asyncio.run_coroutine_threadsafe(self.audio.start(), self.loop)
-            self.is_voice_active = True
-            self._ui_call(lambda: self.ui.update_status("🎤 Voice enabled"))
+            self._ui_call(lambda: self.ui.update_status("🎤 Voice resumed"))
+            self._ui_call(lambda: self.ui.log("🎤 Voice capture resumed"))
+
+    def _on_mode_change(self, mode: str):
+        async def _switch():
+            await self.audio.set_mode(mode)
+            self.openai._capture_sample_rate = self.audio.capture_sample_rate
+            self.openai._capture_channels    = self.audio.capture_channels
+            self._ui_call(lambda: self.ui.update_status(f"✓ {mode.capitalize()} mode"))
+            self._ui_call(lambda: self.ui.log(f"🔄 Audio mode → {mode}"))
+        asyncio.run_coroutine_threadsafe(_switch(), self.loop)
 
     def _toggle_dashboard(self):
-        self._ui_call(lambda: self.ui.update_status("⚙️ Dashboard (not implemented)"))
+        self._ui_call(lambda: self.ui.update_status("⚙ Dashboard (coming soon)"))
 
     async def _on_screen_share_change(self, is_sharing: bool):
         if is_sharing:
-            self._ui_call(self.ui.hide_answer)
-            self._ui_call(lambda: self.ui.update_status("🙈 Screen sharing - hidden"))
-            print("🙈 Screen sharing detected - hiding UI")
+            # already hidden via WDA_EXCLUDEFROMCAPTURE — just log it
+            self._ui_call(lambda: self.ui.log("🙈 Screen sharing detected"))
         else:
-            self._ui_call(lambda: self.ui.update_status("✓ Ready"))
+            self._ui_call(lambda: self.ui.log("✓ Screen sharing ended"))
 
-    # ---------- Main async logic ----------
+    def shutdown(self):
+        """Stop all background resources then force-exit the process."""
+        self.hotkeys.unregister_hotkeys()
+        asyncio.run_coroutine_threadsafe(self.audio.stop(), self.loop).result(timeout=2)
+        self.loop.call_soon_threadsafe(self.loop.stop)
+        os._exit(0)
+
+    # ── Main run ──────────────────────────────────────────────────────────────
 
     async def run(self):
-        await self.openai.connect()
+        try:
+            self._ui_call(lambda: self.ui.log("⏳ Connecting to Groq..."))
+            await self.openai.connect()
+            self._ui_call(lambda: self.ui.log("✓ Groq ready (Whisper + LLaMA)"))
 
-        await self.openai.update_session(
-            {
-                "modalities": ["text"],
-                "voice": "alloy",
-                "input_audio_transcription": {"model": "whisper-1"},
-                "instructions": """You are an interview assistant. Always respond in English only, regardless of the language of the question.
-When the user asks an interview question, provide:
-1. A concise main answer (2–3 sentences)
-2. 3–5 key talking points with bullet points
-3. One compelling insight or example
+            await self.openai.update_session({
+                "instructions": (
+                    "You are an expert interview coach for software engineers and DevOps roles.\n"
+                    "For every interview question respond in this exact structure:\n\n"
+                    "**Summary:** 2-3 sentence explanation of the concept.\n\n"
+                    "**Key Points:**\n"
+                    "- point 1 with explanation\n"
+                    "- point 2 with explanation\n"
+                    "- point 3 with explanation\n"
+                    "- point 4 with explanation\n"
+                    "- point 5 with explanation\n\n"
+                    "**Real-World Example:** Describe how a real company or tool uses this in production.\n\n"
+                    "**Interview Tip:** One sentence on how to impress the interviewer with this answer."
+                ),
+            })
 
-Keep total response under 150 words. Be professional but conversational.""",
-            }
-        )
+            await self.audio.start()
+            self.openai._capture_sample_rate = self.audio.capture_sample_rate
+            self.openai._capture_channels    = self.audio.capture_channels
+            self._ui_call(lambda: self.ui.log("✓ Audio capture started"))
+            self._ui_call(lambda: self.ui.update_status("✓ Ready — speak your question"))
 
-        await self.audio.start()
+            asyncio.create_task(
+                self.screen_detector.monitor(self._on_screen_share_change)
+            )
 
-        # Screen sharing monitor in background
-        asyncio.create_task(self.screen_detector.monitor(self._on_screen_share_change))
+            self._ui_call(lambda: self.ui.log(
+                "✅ Interview Assistant ready — Ctrl+H toggles interviewer visibility"
+            ))
 
-        console.print(Panel(
-            "[green]✓ Interview Assistant is ready![/green]\n"
-            "[dim]Ctrl+H[/dim] toggle  [dim]Ctrl+C[/dim] copy  [dim]Ctrl+V[/dim] voice  [dim]Ctrl+D[/dim] dashboard",
-            border_style="green"
-        ))
+            while True:
+                await asyncio.sleep(1)
 
-        while True:
-            await asyncio.sleep(1)
+        except Exception as e:
+            import traceback
+            self._ui_call(lambda: self.ui.log(f"❌ Startup error: {e}"))
+            self._ui_call(lambda: self.ui.update_status(f"❌ Error: {e}"))
+            raise
 
 
 def main():
+    # Show one startup line in terminal, then silence it
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace") if hasattr(sys.stdout, "reconfigure") else None
+    print("Interview Assistant Pro -- starting (all output in overlay window)")
+    _silence_terminal()
+
     app = QApplication(sys.argv)
     app.setQuitOnLastWindowClosed(False)
 
     loop = asyncio.new_event_loop()
-    t = threading.Thread(target=lambda: (asyncio.set_event_loop(loop), loop.run_forever()), daemon=True)
+    t = threading.Thread(
+        target=lambda: (asyncio.set_event_loop(loop), loop.run_forever()),
+        daemon=True,
+    )
 
+    assistant = None
     try:
         t.start()
-
         assistant = InterviewAssistant(loop, app)
         future = asyncio.run_coroutine_threadsafe(assistant.run(), loop)
 
         def check_error():
-            if future.done() and future.exception():
-                console.print(f"[red]❌ Fatal error:[/red] {future.exception()}")
-                app.quit()
+            try:
+                if future.done():
+                    exc = future.exception()
+                    if exc:
+                        assistant.ui.log(f"❌ Fatal: {exc}")
+                        assistant.ui.update_status(f"❌ {exc}")
+                        # Give user 10 s to read the error before quitting
+                        QTimer.singleShot(10000, app.quit)
+            except Exception:
+                pass
 
-        error_timer = QTimer()
-        error_timer.timeout.connect(check_error)
-        error_timer.start(1000)
+        timer = QTimer()
+        timer.timeout.connect(check_error)
+        timer.start(1000)
 
         sys.exit(app.exec())
-    except RuntimeError as e:
-        console.print(f"[red]❌ Failed to start:[/red] {e}")
+    except Exception as e:
+        import traceback
+        err = traceback.format_exc()
+        # Re-enable stderr so we can see the error
+        sys.stderr = sys.__stderr__
+        print(err, file=sys.stderr)
+        try:
+            if assistant and assistant.ui:
+                assistant.ui.log(f"❌ Failed to start: {e}")
+        except Exception:
+            pass
         sys.exit(1)
     finally:
         loop.call_soon_threadsafe(loop.stop)

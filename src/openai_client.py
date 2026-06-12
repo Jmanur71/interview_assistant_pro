@@ -6,6 +6,7 @@ import io
 import re
 import wave
 from typing import Callable, Optional
+import numpy as np
 from groq import AsyncGroq
 from token_storage import load_token
 
@@ -16,10 +17,14 @@ class OpenAIRealtimeClient:
         self.is_connected = False
         self.client: Optional[AsyncGroq] = None
         self._audio_chunks: list[bytes] = []
+        self._capture_sample_rate: int = 16000
+        self._capture_channels: int = 1
         self._instructions = "You are a helpful interview assistant."
         self._history: list[dict] = []
         self.on_transcription: Optional[Callable] = None
         self.on_answer: Optional[Callable] = None
+        self.on_error: Optional[Callable] = None
+        self._processing = False  # prevent concurrent API calls
 
     async def connect(self):
         token = load_token()
@@ -34,13 +39,24 @@ class OpenAIRealtimeClient:
         self._instructions = config.get("instructions", self._instructions)
         print("✓ Session config loaded")
 
-    def _to_wav(self, chunks: list[bytes]) -> bytes:
+    def _to_wav(self, chunks: list[bytes], sample_rate: int = 16000, channels: int = 1) -> bytes:
+        pcm = np.frombuffer(b"".join(chunks), dtype=np.int16)
+        # Mix down to mono if stereo
+        if channels == 2:
+            pcm = pcm.reshape(-1, 2).mean(axis=1).astype(np.int16)
+        # Resample to 16000 Hz if needed
+        if sample_rate != 16000:
+            ratio = 16000 / sample_rate
+            new_len = int(len(pcm) * ratio)
+            indices = (np.arange(new_len) / ratio).astype(np.int32)
+            indices = np.clip(indices, 0, len(pcm) - 1)
+            pcm = pcm[indices]
         buf = io.BytesIO()
         with wave.open(buf, "wb") as wf:
             wf.setnchannels(1)
             wf.setsampwidth(2)
             wf.setframerate(16000)
-            wf.writeframes(b"".join(chunks))
+            wf.writeframes(pcm.tobytes())
         return buf.getvalue()
 
     async def send_audio(self, audio_base64: str):
@@ -63,11 +79,14 @@ class OpenAIRealtimeClient:
 
     async def send_turn_end(self):
         if not self.is_connected or not self._audio_chunks:
-            print("❌ No audio buffered")
             return
 
-        print("📤 Transcribing audio with Whisper...")
-        wav_bytes = self._to_wav(self._audio_chunks)
+        if self._processing:
+            self._audio_chunks = []  # discard — already busy
+            return
+
+        self._processing = True
+        wav_bytes = self._to_wav(self._audio_chunks, self._capture_sample_rate, self._capture_channels)
         self._audio_chunks = []
 
         try:
@@ -80,10 +99,8 @@ class OpenAIRealtimeClient:
             )
             text = transcript.text.strip()
 
-            # Filter out garbage transcriptions
             words = text.split()
             if not text or len(words) < 2 or len(text) < 8:
-                print("⚠️  Transcription too short or unclear — skipping")
                 return
 
             if self.on_transcription:
@@ -93,13 +110,12 @@ class OpenAIRealtimeClient:
 
             response = await self._call_with_retry(
                 self.client.chat.completions.create,
-                model="llama-3.3-70b-versatile",
-                max_tokens=800,
-                messages=[{"role": "system", "content": self._instructions}] + self._history,
+                model="llama-3.1-8b-instant",
+                max_tokens=500,
+                messages=[{"role": "system", "content": self._instructions}] + self._history[-6:],
             )
             answer = response.choices[0].message.content
             self._history.append({"role": "assistant", "content": answer})
-            # Keep last 10 exchanges to avoid token limit
             if len(self._history) > 20:
                 self._history = self._history[-20:]
 
@@ -107,7 +123,10 @@ class OpenAIRealtimeClient:
                 await self.on_answer([{"type": "message", "content": [{"type": "text", "text": answer}]}])
 
         except Exception as e:
-            print(f"❌ API error: {e}")
+            if self.on_error:
+                await self.on_error(str(e))
+        finally:
+            self._processing = False
 
     async def disconnect(self):
         self.is_connected = False
