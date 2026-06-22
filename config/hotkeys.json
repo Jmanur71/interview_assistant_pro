@@ -2,5 +2,6 @@
   "toggle_visibility": "<ctrl>+h",
   "copy_answer": "<ctrl>+c",
   "toggle_voice_input": "<ctrl>+v",
-  "toggle_dashboard": "<ctrl>+d"
+  "toggle_dashboard": "<ctrl>+d",
+  "restore_window": "<ctrl>+m"
 }
