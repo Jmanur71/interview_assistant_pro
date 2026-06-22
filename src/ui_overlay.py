@@ -11,9 +11,9 @@ def _base_dir() -> str:
     return os.path.join(os.path.dirname(__file__), "..")
 from PyQt6.QtWidgets import (
     QMainWindow, QLabel, QVBoxLayout, QHBoxLayout,
-    QWidget, QApplication, QPushButton, QTextEdit,
+    QWidget, QApplication, QPushButton, QTextEdit, QSizeGrip,
 )
-from PyQt6.QtCore import Qt, QPoint, QDateTime
+from PyQt6.QtCore import Qt, QPoint, QDateTime, QRect
 from PyQt6.QtGui import QCursor, QTextCursor
 from typing import Optional, Callable
 
@@ -34,6 +34,8 @@ class UIOverlay(QMainWindow):
         self.answer_text = ""
         self.transcription_text = ""
         self._hidden_from_capture = True
+        self._collapsed = False
+        self._expanded_height = None
         self._drag_pos = QPoint()
         self.on_mode_change: Optional[Callable] = None
         self.on_close: Optional[Callable] = None
@@ -49,8 +51,8 @@ class UIOverlay(QMainWindow):
     def _setup_window(self):
         w = self.settings["window_width"]
         h = self.settings["window_height"]
-        self.setFixedWidth(w)
-        self.setMinimumHeight(h)
+        self.resize(w, h)
+        self.setMinimumSize(360, 300)
         self.setWindowFlags(
             Qt.WindowType.WindowStaysOnTopHint
             | Qt.WindowType.FramelessWindowHint
@@ -91,6 +93,21 @@ class UIOverlay(QMainWindow):
         tb.addWidget(self._capture_indicator)
         tb.addSpacing(8)
 
+        # font size controls
+        self._font_size = 13
+        for symbol, delta in (("A-", -1), ("A+", +1)):
+            fb = QPushButton(symbol)
+            fb.setFixedSize(28, 22)
+            fb.setToolTip("Decrease font size" if delta < 0 else "Increase font size")
+            fb.setStyleSheet(
+                "QPushButton{background:#2e2e4e;color:#8be9fd;border-radius:4px;"
+                "font-size:10px;font-weight:bold;border:none;padding:0 2px;}"
+                "QPushButton:hover{background:#44475a;color:white;}"
+            )
+            fb.clicked.connect(lambda _c, d=delta: self._change_font_size(d))
+            tb.addWidget(fb)
+        tb.addSpacing(4)
+
         # audio mode buttons
         self._mode_buttons: dict[str, QPushButton] = {}
         for mode, label, tip in [
@@ -113,6 +130,13 @@ class UIOverlay(QMainWindow):
         self.status_label.setStyleSheet("color: #ffb86c; font-size: 10px;")
         tb.addWidget(self.status_label)
 
+        # resize grip hint
+        resize_hint = QLabel("⇲")
+        resize_hint.setStyleSheet("color: #44475a; font-size: 11px;")
+        resize_hint.setToolTip("Drag window edge to resize")
+        tb.addWidget(resize_hint)
+        tb.addSpacing(4)
+
         # ── macOS traffic light buttons ──
         close_btn = QPushButton("✕")
         close_btn.setFixedSize(16, 16)
@@ -126,12 +150,12 @@ class UIOverlay(QMainWindow):
 
         min_btn = QPushButton("–")
         min_btn.setFixedSize(16, 16)
-        min_btn.setToolTip("Minimise")
+        min_btn.setToolTip("Collapse / Expand (Ctrl+M)")
         min_btn.setStyleSheet(
             "QPushButton{background:#ffbd2e;color:rgba(0,0,0,0);border-radius:8px;font-size:9px;font-weight:bold;border:none;}"
             "QPushButton:hover{background:#e6a800;color:rgba(0,0,0,180);}"
         )
-        min_btn.clicked.connect(self.showMinimized)
+        min_btn.clicked.connect(self.toggle_collapse)
         tb.addWidget(min_btn)
 
         max_btn = QPushButton("⤢")
@@ -166,13 +190,14 @@ class UIOverlay(QMainWindow):
         self.answer_box = QTextEdit()
         self.answer_box.setReadOnly(True)
         self.answer_box.setMinimumHeight(self.settings["window_height"] - 200)
-        self.answer_box.setStyleSheet(
-            "QTextEdit{color:#f8f8f2;font-size:13px;background:rgba(0,0,0,0);"
-            "border:none;padding:4px;}"
-            "QScrollBar:vertical{width:5px;background:transparent;}"
-            "QScrollBar::handle:vertical{background:#44475a;border-radius:2px;}"
-            "QScrollBar::add-line:vertical,QScrollBar::sub-line:vertical{height:0;}"
+        self._answer_font_style = (
+            "QTextEdit{{color:#f8f8f2;font-size:{sz}px;background:rgba(0,0,0,0);"
+            "border:none;padding:4px;}}"
+            "QScrollBar:vertical{{width:5px;background:transparent;}}"
+            "QScrollBar::handle:vertical{{background:#44475a;border-radius:2px;}}"
+            "QScrollBar::add-line:vertical,QScrollBar::sub-line:vertical{{height:0;}}"
         )
+        self.answer_box.setStyleSheet(self._answer_font_style.format(sz=self._font_size))
         self.answer_box.setHtml("<span style='color:#6272a4;'>Answer will appear here...</span>")
         cl.addWidget(self.answer_box)
 
@@ -192,12 +217,18 @@ class UIOverlay(QMainWindow):
         cl.addWidget(self._log_box)
 
         # hint
-        hint = QLabel("Ctrl+H toggle capture-hide  •  Ctrl+C copy  •  Ctrl+V pause/resume voice")
+        hint = QLabel("Ctrl+H hide  •  Ctrl+C copy  •  Ctrl+V pause/resume  •  Ctrl+M collapse")
         hint.setStyleSheet("color: #44475a; font-size: 9px;")
         hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
         cl.addWidget(hint)
 
         outer.addWidget(content)
+
+        # bottom-right resize grip
+        grip = QSizeGrip(root)
+        grip.setFixedSize(14, 14)
+        grip.setStyleSheet("background: transparent;")
+        outer.addWidget(grip, 0, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignBottom)
 
         container = QWidget()
         QVBoxLayout(container).addWidget(root)
@@ -232,6 +263,25 @@ class UIOverlay(QMainWindow):
     def toggle_capture_hide(self):
         """Ctrl+H: toggle whether interviewer's screen capture can see this window."""
         self._apply_capture_affinity(not self._hidden_from_capture)
+
+    def toggle_collapse(self):
+        """Collapse to title-bar only, or expand back. Ctrl+M also calls this."""
+        if self._collapsed:
+            if self._expanded_height:
+                self.resize(self.width(), self._expanded_height)
+            self._collapsed = False
+        else:
+            self._expanded_height = self.height()
+            self.resize(self.width(), 34)  # title bar height only
+            self._collapsed = True
+
+    def restore(self):
+        """Always bring window back to expanded visible state."""
+        if self._collapsed:
+            self.toggle_collapse()
+        self.showNormal()
+        self.raise_()
+        self.activateWindow()
 
     # ── drag ──────────────────────────────────────────────────────────────────
 
@@ -270,25 +320,139 @@ class UIOverlay(QMainWindow):
 
     def _format_answer(self, text: str) -> str:
         import re
-        lines = text.split("\n")
         out = []
-        for line in lines:
-            s = line.strip()
-            if not s:
+        lines = text.split("\n")
+        i = 0
+        while i < len(lines):
+            s = lines[i].strip()
+
+            # ── multi-line code block ──────────────────────────────────────
+            if s.upper().startswith("CODEBLOCK:"):
+                lang = s[10:].strip() or "code"
+                i += 1
+                block_lines = []
+                while i < len(lines) and lines[i].strip().upper() != "ENDCODEBLOCK":
+                    block_lines.append(lines[i].rstrip())
+                    i += 1
+                # strip common leading whitespace
+                dedented = self._dedent(block_lines)
+                rows = "".join(
+                    f"<div style='white-space:pre;'>{self._highlight_code(l)}</div>"
+                    for l in dedented
+                )
+                out.append(
+                    f"<div style='background:rgba(30,31,48,0.97);border:1px solid #44475a;"
+                    f"border-radius:6px;padding:8px 12px;margin:6px 0;'>"
+                    f"<div style='color:#6272a4;font-family:Consolas,monospace;font-size:10px;"
+                    f"margin-bottom:4px;'>{lang}</div>"
+                    f"<div style='font-family:Consolas,monospace;font-size:12px;line-height:1.6;'>"
+                    f"{rows}</div></div>"
+                )
+
+            # ── single-line command ────────────────────────────────────────
+            elif s.upper().startswith("CODE:"):
+                code = s[5:].strip()
+                out.append(
+                    f"<div style='background:rgba(40,42,54,0.9);border-left:3px solid #ff79c6;"
+                    f"border-radius:4px;padding:4px 10px;margin:3px 0;'>"
+                    f"<span style='color:#ff79c6;font-family:Consolas,monospace;font-size:12px;'>$ </span>"
+                    f"<span style='color:#f1fa8c;font-family:Consolas,monospace;font-size:12px;'>{code}</span>"
+                    f"</div>"
+                )
+
+            # ── tip line ───────────────────────────────────────────────────
+            elif s.upper().startswith("TIP:"):
+                tip = s[4:].strip()
+                out.append(
+                    f"<div style='margin-top:6px;padding:4px 8px;border-radius:4px;"
+                    f"background:rgba(80,250,123,0.08);border-left:3px solid #50fa7b;'>"
+                    f"<span style='color:#50fa7b;font-size:11px;'>💡 {tip}</span></div>"
+                )
+
+            elif not s:
                 out.append("")
+
             elif s.startswith("* ") or s.startswith("- "):
-                out.append(f"&nbsp;&nbsp;<span style='color:#50fa7b;'>&#9679;</span> {s[2:].strip()}")
+                content = self._inline_code(s[2:].strip())
+                # Check for definition pattern: **Term** is: description
+                import re as _re
+                m = _re.match(r"<b style='color:#8be9fd;'>(.+?)</b>\s*(?:is:?|-)\s*(.*)", content)
+                if m:
+                    out.append(
+                        f"<div style='margin:3px 0 3px 8px;padding:4px 8px;"
+                        f"border-left:2px solid #6272a4;border-radius:0 4px 4px 0;'>"
+                        f"<b style='color:#8be9fd;'>{m.group(1)}</b>"
+                        f"<span style='color:#6272a4;'> — </span>"
+                        f"<span style='color:#f8f8f2;'>{m.group(2)}</span></div>"
+                    )
+                else:
+                    out.append(f"&nbsp;&nbsp;<span style='color:#50fa7b;'>&#9679;</span> {content}")
+
             elif s.startswith("**") and s.endswith("**"):
                 out.append(f"<b style='color:#8be9fd;'>{s[2:-2]}</b>")
+
             elif s.startswith("**") and ":**" in s:
                 label, rest = s.split(":**", 1)
-                out.append(f"<b style='color:#8be9fd;'>{label[2:]}:</b> {rest.strip()}")
+                out.append(f"<b style='color:#8be9fd;'>{label[2:]}:</b> {self._inline_code(rest.strip())}")
+
             elif re.match(r'^\*\*(.+):\*\*', s):
                 s2 = re.sub(r'^\*\*(.+):\*\*', r"<b style='color:#8be9fd;'>\1:</b>", s)
                 out.append(s2)
+
             else:
-                out.append(s)
+                out.append(self._inline_code(s))
+
+            i += 1
+
         return "<br>".join(out)
+
+    @staticmethod
+    def _dedent(lines: list) -> list:
+        """Strip common leading whitespace from a block of lines."""
+        non_empty = [l for l in lines if l.strip()]
+        if not non_empty:
+            return lines
+        indent = min(len(l) - len(l.lstrip()) for l in non_empty)
+        return [l[indent:] for l in lines]
+
+    @staticmethod
+    def _highlight_code(line: str) -> str:
+        """Very lightweight syntax colouring for the code block renderer."""
+        import re, html
+        s = html.escape(line)
+        # comments
+        s = re.sub(r'(#.*?)$', r"<span style='color:#6272a4;'>\1</span>", s)
+        # strings
+        s = re.sub(r'(&quot;[^&]*?&quot;|\'[^\']*?\')',
+                   r"<span style='color:#f1fa8c;'>\1</span>", s)
+        # keywords
+        kws = r'\b(def|return|class|import|from|if|else|elif|for|while|in|not|and|or|True|False|None|with|as|try|except|finally|raise|yield|lambda|pass|break|continue|self)\b'
+        s = re.sub(kws, r"<span style='color:#ff79c6;'>\1</span>", s)
+        # numbers
+        s = re.sub(r'\b(\d+\.?\d*)\b', r"<span style='color:#bd93f9;'>\1</span>", s)
+        # built-ins / decorators
+        s = re.sub(r'(@\w+)', r"<span style='color:#50fa7b;'>\1</span>", s)
+        return s
+
+    @staticmethod
+    def _inline_code(text: str) -> str:
+        """Render inline `backtick` code and **bold** spans."""
+        import re
+        # bold: **text**
+        text = re.sub(
+            r'\*\*(.+?)\*\*',
+            r"<b style='color:#8be9fd;'>\1</b>",
+            text
+        )
+        # inline code: `text`
+        text = re.sub(
+            r'`([^`]+)`',
+            r"<span style='background:rgba(40,42,54,0.9);color:#f1fa8c;"
+            r"font-family:Consolas,monospace;font-size:11px;"
+            r"padding:0 3px;border-radius:3px;'>\1</span>",
+            text
+        )
+        return text
 
     def update_status(self, status: str):
         color = (
@@ -318,6 +482,13 @@ class UIOverlay(QMainWindow):
         self.update_status(f"Switching to {mode}...")
         if self.on_mode_change:
             self.on_mode_change(mode)
+
+    def _change_font_size(self, delta: int):
+        self._font_size = max(9, min(24, self._font_size + delta))
+        self.answer_box.setStyleSheet(self._answer_font_style.format(sz=self._font_size))
+        # re-render current answer to apply new size
+        if self.answer_text:
+            self.answer_box.setHtml(self._format_answer(self.answer_text))
 
     def _toggle_maximize(self):
         if self.isMaximized():

@@ -107,6 +107,7 @@ class InterviewAssistant:
             "copy_answer":         self._copy_answer,
             "toggle_voice_input":  self._toggle_voice_input,
             "toggle_dashboard":    self._toggle_dashboard,
+            "restore_window":      self._restore_window,
         })
 
         self.ui.log("✓ All systems initialized")
@@ -206,6 +207,10 @@ class InterviewAssistant:
     def _toggle_dashboard(self):
         self._ui_call(lambda: self.ui.update_status("⚙ Dashboard (coming soon)"))
 
+    def _restore_window(self):
+        """Ctrl+M — collapse/expand toggle. Always brings the window back."""
+        self._ui_call(self.ui.toggle_collapse)
+
     async def _on_screen_share_change(self, is_sharing: bool):
         if is_sharing:
             # already hidden via WDA_EXCLUDEFROMCAPTURE — just log it
@@ -230,17 +235,14 @@ class InterviewAssistant:
 
             await self.openai.update_session({
                 "instructions": (
-                    "You are an expert interview coach for software engineers and DevOps roles.\n"
-                    "For every interview question respond in this exact structure:\n\n"
-                    "**Summary:** 2-3 sentence explanation of the concept.\n\n"
-                    "**Key Points:**\n"
-                    "- point 1 with explanation\n"
-                    "- point 2 with explanation\n"
-                    "- point 3 with explanation\n"
-                    "- point 4 with explanation\n"
-                    "- point 5 with explanation\n\n"
-                    "**Real-World Example:** Describe how a real company or tool uses this in production.\n\n"
-                    "**Interview Tip:** One sentence on how to impress the interviewer with this answer."
+                    "You are a software engineer being interviewed. Be concise and human."
+                    " Answer every question in this exact format and nothing else:\n"
+                    "<one sentence direct answer>\n"
+                    "- <key point 1>\n"
+                    "- <key point 2>\n"
+                    "- <key point 3>\n"
+                    "<one sentence real-world example>\n"
+                    "No headers. No bold labels. No paragraphs. Max 80 words total."
                 ),
             })
 
@@ -269,10 +271,9 @@ class InterviewAssistant:
 
 
 def main():
-    # Show one startup line in terminal, then silence it
     sys.stdout.reconfigure(encoding="utf-8", errors="replace") if hasattr(sys.stdout, "reconfigure") else None
-    print("Interview Assistant Pro -- starting (all output in overlay window)")
-    _silence_terminal()
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace") if hasattr(sys.stderr, "reconfigure") else None
+    print("Interview Assistant Pro -- starting")
 
     app = QApplication(sys.argv)
     app.setQuitOnLastWindowClosed(False)

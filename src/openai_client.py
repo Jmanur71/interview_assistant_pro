@@ -19,7 +19,21 @@ class OpenAIRealtimeClient:
         self._audio_chunks: list[bytes] = []
         self._capture_sample_rate: int = 16000
         self._capture_channels: int = 1
-        self._instructions = "You are a helpful interview assistant."
+        self._instructions = (
+            "You are an expert technical interview coach specialising in DevOps, Cloud, Linux, and Software Engineering. "
+            "When answering interview questions:\n"
+            "1. Start with a clear, confident 1-2 sentence direct answer.\n"
+            "2. Explain the core concept with a real-world analogy or definition.\n"
+            "3. List 3-5 key bullet points using '- ' prefix.\n"
+            "4. SINGLE-LINE commands (e.g. shell commands): prefix each with 'CODE: ' on its own line. Example: CODE: free -h\n"
+            "5. MULTI-LINE code samples (Python, JS, YAML, etc.): wrap the entire block between "
+            "'CODEBLOCK:' on one line and 'ENDCODEBLOCK' on its own line. "
+            "Write clean, idiomatic, production-quality code with proper naming. "
+            "Never use markdown code fences (no triple backticks).\n"
+            "6. After any code, briefly explain what it does in 1-2 lines.\n"
+            "7. End with exactly one line starting 'TIP: ' to impress the interviewer.\n"
+            "Use **bold** for section headers only. Keep total answer under 400 words. Be precise and interview-ready."
+        )
         self._history: list[dict] = []
         self.on_transcription: Optional[Callable] = None
         self.on_answer: Optional[Callable] = None
@@ -111,7 +125,7 @@ class OpenAIRealtimeClient:
             response = await self._call_with_retry(
                 self.client.chat.completions.create,
                 model="llama-3.1-8b-instant",
-                max_tokens=500,
+                max_tokens=700,
                 messages=[{"role": "system", "content": self._instructions}] + self._history[-6:],
             )
             answer = response.choices[0].message.content
