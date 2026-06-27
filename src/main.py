@@ -224,11 +224,21 @@ class InterviewAssistant:
             self._ui_call(lambda: self.ui.log("✓ Screen sharing ended"))
 
     def shutdown(self):
-        """Stop all background resources then force-exit the process."""
+        """Stop all background resources then exit gracefully."""
         self.hotkeys.unregister_hotkeys()
-        asyncio.run_coroutine_threadsafe(self.audio.stop(), self.loop).result(timeout=2)
-        self.loop.call_soon_threadsafe(self.loop.stop)
-        os._exit(0)
+        try:
+            asyncio.run_coroutine_threadsafe(self.audio.stop(), self.loop).result(timeout=2)
+        except Exception:
+            pass
+        try:
+            self.loop.call_soon_threadsafe(self.loop.stop)
+        except Exception:
+            pass
+        # Ask the Qt application to quit; main() will perform final cleanup
+        try:
+            self.app.quit()
+        except Exception:
+            pass
 
     # ── Resume upload handler ─────────────────────────────────────────────────
 
