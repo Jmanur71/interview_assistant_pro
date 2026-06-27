@@ -21,22 +21,22 @@ class OpenAIRealtimeClient:
         self._capture_sample_rate: int = 16000
         self._capture_channels: int = 1
         self._instructions = (
-            "You are a technical interview coach. Provide SHORT, direct answers (150-250 words max).\n\n"
-            "ANSWER STRUCTURE (VERY CONCISE):\n\n"
-            "1. **Direct Answer** (1-2 sentences) - Answer immediately, be specific.\n\n"
-            "2. **Key Points** (3-4 bullets max) - Only the essential facts.\n\n"
-            "3. **Quick Example** - ONE real company OR simple code snippet OR command.\n\n"
-            "4. **Why It Matters** (1-2 sentences) - Real business impact.\n\n"
-            "RULES:\n"
-            "- NEVER exceed 250 words\n"
-            "- Be specific, not generic\n"
-            "- Skip fluff and lengthy explanations\n"
-            "- Use CODE: for single commands\n"
-            "- Use CODEBLOCK: language for code only if absolutely needed\n"
-            "- Use - for bullets (max 4)\n"
-            "- No markdown backticks\n\n"
-            "TONE: Direct, professional, interview-ready.\n"
-            "FOCUS: Answer the exact question asked, nothing more."
+            "You are a technical interview coach. Answer in EXACTLY 80-150 words.\n\n"
+            "MANDATORY STRUCTURE:\n"
+            "1. **Direct Answer** (1 sentence max) - Be specific, not vague.\n"
+            "2. **3 Key Points** (bullet format) - Essential facts only.\n"
+            "3. **Example** - ONE command or real-world fact.\n"
+            "4. **Why It Matters** (1 sentence) - Business value.\n\n"
+            "ABSOLUTE RULES:\n"
+            "- MAXIMUM 150 words total - count them!\n"
+            "- No long explanations, only facts\n"
+            "- No markdown backticks\n"
+            "- Use 'CODE: command' for single-line examples\n"
+            "- Use bullet points with '-' (max 3)\n"
+            "- Answer the EXACT question asked, nothing else\n"
+            "- Be concise, be direct, be interview-ready\n\n"
+            "TONE: Professional, confident, accurate.\n"
+            "WORD LIMIT: 80-150 words maximum."
         )
         self._history: list[dict] = []
         self.on_transcription: Optional[Callable] = None
@@ -97,6 +97,15 @@ class OpenAIRealtimeClient:
                 else:
                     raise
 
+    def _truncate_answer(self, answer: str, max_words: int = 200) -> str:
+        """Truncate answer to max word count if it exceeds limits."""
+        words = answer.split()
+        if len(words) > max_words:
+            truncated = " ".join(words[:max_words])
+            truncated = truncated.rstrip(",;:") + " [truncated]"
+            return truncated
+        return answer
+
     async def send_turn_end(self):
         if not self.is_connected or not self._audio_chunks:
             return
@@ -139,10 +148,14 @@ class OpenAIRealtimeClient:
             response = await self._call_with_retry(
                 self.client.chat.completions.create,
                 model="llama-3.1-8b-instant",
-                max_tokens=300,
+                max_tokens=200,
                 messages=messages,
             )
             answer = response.choices[0].message.content
+            
+            # Truncate answer if it exceeds word limit
+            answer = self._truncate_answer(answer, max_words=160)
+            
             self._history.append({"role": "assistant", "content": answer})
             if len(self._history) > 20:
                 self._history = self._history[-20:]

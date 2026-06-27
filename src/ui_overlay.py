@@ -350,32 +350,41 @@ class UIOverlay(QMainWindow):
             self.transcription_label.setText("")
 
     def set_answer(self, text: str):
-        """Display a new answer - replaces previous answer, keeps history below with separator."""
+        """Display a new answer - clean and concise."""
+        # Clean text of excessive whitespace first
+        text = self._clean_answer_text(text)
+        
         # Clear transcription when showing answer
         self.transcription_text = ""
         self.transcription_label.setText("")
         
-        # Store new answer
+        # Store new answer (current only - no appending)
         self.answer_text = text
         self._answer_history.append(text)
         
-        # Keep only last 5 answers to avoid excessive scrollback
-        if len(self._answer_history) > 5:
-            self._answer_history = self._answer_history[-5:]
+        # Keep only last 3 answers to prevent excessive scrollback
+        if len(self._answer_history) > 3:
+            self._answer_history = self._answer_history[-3:]
         
-        # Display answer with history separator if applicable
-        if len(self._answer_history) > 1:
-            display_text = "\n\n".join([f"Q{i+1}:\n{a}" for i, a in enumerate(self._answer_history)])
-        else:
-            display_text = self.answer_text
-            
-        self.answer_box.setHtml(self._format_answer(display_text))
+        # Display only current answer (no Q1, Q2 labels - simpler)
+        self.answer_box.setHtml(self._format_answer(self.answer_text))
         
-        # Scroll to the bottom to show the latest answer
+        # Scroll to the bottom to show the answer
         try:
             self.answer_box.verticalScrollBar().setValue(self.answer_box.verticalScrollBar().maximum())
         except Exception:
             pass
+
+    def _clean_answer_text(self, text: str) -> str:
+        """Clean answer text of excessive whitespace and formatting issues."""
+        import re
+        # Remove multiple blank lines
+        text = re.sub(r'\n\n\n+', '\n\n', text)
+        # Remove excessive spaces
+        text = re.sub(r'  +', ' ', text)
+        # Clean up any weird characters or encoding issues
+        text = text.strip()
+        return text
 
     def show_answer(self, text: str):
         self.set_answer(text)
