@@ -342,10 +342,18 @@ class UIOverlay(QMainWindow):
             self.transcription_label.setText(f"❓ {text}")
 
     def set_answer(self, text: str):
-        self.answer_text = text
-        self.answer_box.clear()
-        self.answer_box.setHtml(self._format_answer(text))
-        self.answer_box.verticalScrollBar().setValue(0)
+        # Preserve previous answers: append new answer separated by a divider
+        if self.answer_text:
+            self.answer_text = self.answer_text + "\n\n---\n\n" + text
+        else:
+            self.answer_text = text
+        # Render the full answer history
+        self.answer_box.setHtml(self._format_answer(self.answer_text))
+        # Scroll to the bottom to show the latest answer
+        try:
+            self.answer_box.verticalScrollBar().setValue(self.answer_box.verticalScrollBar().maximum())
+        except Exception:
+            pass
 
     def show_answer(self, text: str):
         self.set_answer(text)
@@ -529,7 +537,23 @@ class UIOverlay(QMainWindow):
             self.showMaximized()
 
     def closeEvent(self, event):
-        event.ignore()  # X on taskbar does nothing; only red button quits via app.quit()
+        """Handle window close (title-bar X). Delegate to registered on_close if provided for graceful shutdown."""
+        try:
+            if self.on_close:
+                try:
+                    self.on_close()
+                except Exception:
+                    pass
+                event.accept()
+                return
+        except Exception:
+            pass
+        # Fallback: quit the application
+        try:
+            QApplication.instance().quit()
+        except Exception:
+            pass
+        event.accept()
 
     # ── Resume upload handling ─────────────────────────────────────────────────
 
