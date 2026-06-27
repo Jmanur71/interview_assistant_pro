@@ -149,8 +149,9 @@ class AudioProcessor:
                         self._mix_and_emit(source, raw, rate, channels)
                     else:
                         self._vad_and_emit(raw, rate, channels)
-                except Exception:
+                except Exception as e:
                     if self.is_running:
+                        print(f"⚠️ {source} read error: {e}")
                         break
         except Exception as e:
             if self.is_running:

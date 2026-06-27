@@ -15,6 +15,8 @@ import threading
 # ── Suppress terminal output after startup ────────────────────────────────────
 import io
 _null = open(os.devnull, "w", encoding="utf-8", errors="replace")
+import atexit
+atexit.register(_null.close)
 
 def _silence_terminal():
     sys.stdout = _null
@@ -132,10 +134,11 @@ class InterviewAssistant:
         if self.openai._processing:
             self._ui_call(lambda: self.ui.update_status("⏳ Still processing previous..."))
             self._ui_call(lambda: self.ui.log("⏭ Skipped — previous answer still processing"))
+            return
         else:
             self._ui_call(lambda: self.ui.update_status("⏳ Processing..."))
             self._ui_call(lambda: self.ui.log("⏹ Voice ended — sending to AI"))
-        await self.openai.send_turn_end()
+            await self.openai.send_turn_end()
 
     async def _on_transcription(self, text: str):
         self.current_question = text
@@ -246,18 +249,8 @@ class InterviewAssistant:
             await self.openai.connect()
             self._ui_call(lambda: self.ui.log("✓ Groq ready (Whisper + LLaMA)"))
 
-            await self.openai.update_session({
-                "instructions": (
-                    "You are a software engineer being interviewed. Be concise and human."
-                    " Answer every question in this exact format and nothing else:\n"
-                    "<one sentence direct answer>\n"
-                    "- <key point 1>\n"
-                    "- <key point 2>\n"
-                    "- <key point 3>\n"
-                    "<one sentence real-world example>\n"
-                    "No headers. No bold labels. No paragraphs. Max 80 words total."
-                ),
-            })
+            # Use the optimized system prompt (already set in openai_client.py)
+            # Don't override it
 
             await self.audio.start()
             self.openai._capture_sample_rate = self.audio.capture_sample_rate
@@ -291,39 +284,58 @@ def main():
     app = QApplication(sys.argv)
     app.setQuitOnLastWindowClosed(False)
 
+    # Create event loop in main thread (before async thread)
     loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    
+    # Background thread for async operations
     t = threading.Thread(
-        target=lambda: (asyncio.set_event_loop(loop), loop.run_forever()),
-        daemon=True,
+        target=loop.run_forever,
+        daemon=False,
+        name="AsyncEventLoop"
     )
 
     assistant = None
+    future = None
+    
     try:
         t.start()
+        print("✓ Event loop started in background thread")
+        
+        # Give thread time to initialize
+        import time
+        time.sleep(0.1)
+        
         assistant = InterviewAssistant(loop, app)
         future = asyncio.run_coroutine_threadsafe(assistant.run(), loop)
 
         def check_error():
             try:
-                if future.done():
+                if future and future.done():
                     exc = future.exception()
                     if exc:
-                        assistant.ui.log(f"❌ Fatal: {exc}")
-                        assistant.ui.update_status(f"❌ {exc}")
-                        # Give user 10 s to read the error before quitting
+                        try:
+                            assistant.ui.log(f"❌ Fatal: {exc}")
+                            assistant.ui.update_status(f"❌ {exc}")
+                        except Exception:
+                            pass
+                        # Give user 10s to read the error before quitting
                         QTimer.singleShot(10000, app.quit)
-            except Exception:
-                pass
+            except Exception as e:
+                print(f"Error in check_error: {e}", file=sys.stderr)
 
         timer = QTimer()
         timer.timeout.connect(check_error)
         timer.start(1000)
 
-        sys.exit(app.exec())
+        # Keep Qt app running
+        exit_code = app.exec()
+        print("✓ Qt application closed")
+        return exit_code
+        
     except Exception as e:
         import traceback
         err = traceback.format_exc()
-        # Re-enable stderr so we can see the error
         sys.stderr = sys.__stderr__
         print(err, file=sys.stderr)
         try:
@@ -331,11 +343,34 @@ def main():
                 assistant.ui.log(f"❌ Failed to start: {e}")
         except Exception:
             pass
-        sys.exit(1)
+        return 1
     finally:
-        loop.call_soon_threadsafe(loop.stop)
+        # Graceful cleanup
+        print("Shutting down...")
+        try:
+            if future:
+                future.cancel()
+        except Exception:
+            pass
+        
+        # Stop the event loop safely
+        try:
+            loop.call_soon_threadsafe(loop.stop)
+        except Exception:
+            pass
+        
+        # Wait for thread to finish (max 3 seconds)
         t.join(timeout=3)
-        loop.close()
+        
+        # Close event loop
+        try:
+            if not loop.is_closed():
+                loop.close()
+        except Exception:
+            pass
+        
+        print("✓ Cleanup complete")
+        sys.exit(0)
 
 
 if __name__ == "__main__":

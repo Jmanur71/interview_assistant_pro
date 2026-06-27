@@ -260,9 +260,21 @@ class UIOverlay(QMainWindow):
         x, y = pos.get("x"), pos.get("y")
         if x is None or y is None:
             g = QApplication.primaryScreen().geometry()
-            x = g.width() - self.settings["window_width"] - 20
-            y = 60
+            x = 100  # Left margin
+            y = 100  # Top margin
         self.move(x, y)
+        
+        # Ensure window is on screen
+        screen_rect = QApplication.primaryScreen().geometry()
+        if self.frameGeometry().right() > screen_rect.right():
+            self.move(screen_rect.right() - self.width() - 20, y)
+        if self.frameGeometry().bottom() > screen_rect.bottom():
+            self.move(x, screen_rect.bottom() - self.height() - 20)
+        
+        # Make window visible and bring to front
+        self.show()
+        self.raise_()
+        self.activateWindow()
 
     # ── capture affinity ───────────────────────────────────────────────────────
 
@@ -522,29 +534,60 @@ class UIOverlay(QMainWindow):
     # ── Resume upload handling ─────────────────────────────────────────────────
 
     def _upload_resume(self):
+        """Upload and parse resume in multiple formats (PDF, DOCX, DOC, TXT, RTF)."""
         try:
-            path, _ = QFileDialog.getOpenFileName(self, "Select resume file", _base_dir(),
-                                                  "Text files (*.txt);;All files (*.*)")
+            from resume_parser import ResumeParser
+            
+            # Use the new file format filter supporting all formats
+            file_filter = ResumeParser.get_supported_formats_filter()
+            path, _ = QFileDialog.getOpenFileName(
+                self, 
+                "Select resume file", 
+                _base_dir(),
+                file_filter
+            )
+            
             if not path:
                 return
-            # Read as text; keep simple for now
-            try:
-                with open(path, "r", encoding="utf-8", errors="replace") as f:
-                    content = f.read()
-            except Exception:
-                # fallback: read bytes and decode
-                with open(path, "rb") as f:
-                    content = f.read().decode("utf-8", errors="replace")
 
             fname = os.path.basename(path)
-            self.log(f"✓ Resume loaded: {fname} ({len(content)} chars)")
-            self._resume_label.setText(fname)
+            file_ext = os.path.splitext(fname)[1].lower()
+
+            # Check if format is supported
+            if file_ext not in ResumeParser.SUPPORTED_FORMATS:
+                self.log(f"❌ Unsupported format: {file_ext}. Supported: PDF, DOCX, DOC, TXT, RTF")
+                return
+
+            # Parse the resume file
+            self.log(f"📄 Parsing {fname}...")
+            content, error = ResumeParser.parse(path)
+
+            if error:
+                self.log(f"❌ Failed to parse resume: {error}")
+                return
+
+            if not content:
+                self.log(f"❌ Resume file is empty or contains no text")
+                return
+
+            # Success!
+            file_size = ResumeParser.get_file_size_info(path)
+            char_count = len(content)
+            self.log(f"✓ Resume loaded: {fname} ({char_count} chars, {file_size})")
+            self._resume_label.setText(f"📎 {fname}")
+
+            # Update resume label with format indicator
+            format_name = ResumeParser.SUPPORTED_FORMATS.get(file_ext, "Document")
+            self._resume_label.setToolTip(f"{format_name}\n{file_size}\n{char_count} characters")
+
+            # Call the callback with parsed content
             if self.on_resume_upload:
-                # call callback with text and filename
                 try:
                     self.on_resume_upload(content, fname)
-                except Exception:
-                    pass
+                except Exception as e:
+                    self.log(f"❌ Error processing resume: {str(e)}")
 
+        except ImportError as e:
+            self.log(f"❌ Resume upload failed - missing dependency: {str(e)}")
         except Exception as e:
-            self.log(f"❌ Resume upload failed: {e}")
+            self.log(f"❌ Resume upload failed: {str(e)}")

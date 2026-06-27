@@ -4,15 +4,15 @@
   "format": "structured",
   "show_transcription": true,
   "auto_trigger": true,
-  "window_width": 520,
-  "window_height": 420,
+  "window_width": 600,
+  "window_height": 500,
   "transparent": false,
   "alpha": 0.95,
   "position": {
-    "x": null,
-    "y": null
+    "x": 100,
+    "y": 100
   },
-  "voice_activation_threshold": 0.04,
-  "silence_duration": 2.0,
+  "voice_activation_threshold": 0.02,
+  "silence_duration": 1.5,
   "audio_mode": "mic"
 }

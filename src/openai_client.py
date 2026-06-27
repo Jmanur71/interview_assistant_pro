@@ -1,4 +1,4 @@
-"""Groq client using Whisper + LLaMA"""
+"""Groq client using Whisper + LLaMA with LangChain for better prompting"""
 
 import asyncio
 import base64
@@ -9,6 +9,7 @@ from typing import Callable, Optional
 import numpy as np
 from groq import AsyncGroq
 from token_storage import load_token
+from langchain_prompt_engine import LangChainPromptEngine
 
 
 class OpenAIRealtimeClient:
@@ -20,19 +21,22 @@ class OpenAIRealtimeClient:
         self._capture_sample_rate: int = 16000
         self._capture_channels: int = 1
         self._instructions = (
-            "You are an expert technical interview coach specialising in DevOps, Cloud, Linux, and Software Engineering. "
-            "When answering interview questions:\n"
-            "1. Start with a clear, confident 1-2 sentence direct answer.\n"
-            "2. Explain the core concept with a real-world analogy or definition.\n"
-            "3. List 3-5 key bullet points using '- ' prefix.\n"
-            "4. SINGLE-LINE commands (e.g. shell commands): prefix each with 'CODE: ' on its own line. Example: CODE: free -h\n"
-            "5. MULTI-LINE code samples (Python, JS, YAML, etc.): wrap the entire block between "
-            "'CODEBLOCK:' on one line and 'ENDCODEBLOCK' on its own line. "
-            "Write clean, idiomatic, production-quality code with proper naming. "
-            "Never use markdown code fences (no triple backticks).\n"
-            "6. After any code, briefly explain what it does in 1-2 lines.\n"
-            "7. End with exactly one line starting 'TIP: ' to impress the interviewer.\n"
-            "Use **bold** for section headers only. Keep total answer under 400 words. Be precise and interview-ready."
+            "You are a technical interview coach. Provide SHORT, direct answers (150-250 words max).\n\n"
+            "ANSWER STRUCTURE (VERY CONCISE):\n\n"
+            "1. **Direct Answer** (1-2 sentences) - Answer immediately, be specific.\n\n"
+            "2. **Key Points** (3-4 bullets max) - Only the essential facts.\n\n"
+            "3. **Quick Example** - ONE real company OR simple code snippet OR command.\n\n"
+            "4. **Why It Matters** (1-2 sentences) - Real business impact.\n\n"
+            "RULES:\n"
+            "- NEVER exceed 250 words\n"
+            "- Be specific, not generic\n"
+            "- Skip fluff and lengthy explanations\n"
+            "- Use CODE: for single commands\n"
+            "- Use CODEBLOCK: language for code only if absolutely needed\n"
+            "- Use - for bullets (max 4)\n"
+            "- No markdown backticks\n\n"
+            "TONE: Direct, professional, interview-ready.\n"
+            "FOCUS: Answer the exact question asked, nothing more."
         )
         self._history: list[dict] = []
         self.on_transcription: Optional[Callable] = None
@@ -124,19 +128,18 @@ class OpenAIRealtimeClient:
 
             self._history.append({"role": "user", "content": text})
 
-            # Build messages; include instructions and optionally the resume
-            messages = [{"role": "system", "content": self._instructions}]
-            if self.resume_text:
-                # include a truncated resume snippet to keep payloads reasonable
-                resume_snip = self.resume_text[:3000]
-                messages.append({"role": "system", "content": f"Candidate resume:\n{resume_snip}"})
-
-            messages = messages + self._history[-6:]
+            # Build messages with system instruction (skip LangChain for concise answers)
+            messages = [
+                {"role": "system", "content": self._instructions}
+            ]
+            
+            # Add conversation history (last 3 turns for context)
+            messages = messages + self._history[-3:]
 
             response = await self._call_with_retry(
                 self.client.chat.completions.create,
                 model="llama-3.1-8b-instant",
-                max_tokens=700,
+                max_tokens=300,
                 messages=messages,
             )
             answer = response.choices[0].message.content
