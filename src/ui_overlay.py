@@ -11,7 +11,7 @@ def _base_dir() -> str:
     return os.path.join(os.path.dirname(__file__), "..")
 from PyQt6.QtWidgets import (
     QMainWindow, QLabel, QVBoxLayout, QHBoxLayout,
-    QWidget, QApplication, QPushButton, QTextEdit, QSizeGrip,
+    QWidget, QApplication, QPushButton, QTextEdit, QSizeGrip, QFileDialog,
 )
 from PyQt6.QtCore import Qt, QPoint, QDateTime, QRect
 from PyQt6.QtGui import QCursor, QTextCursor
@@ -39,6 +39,8 @@ class UIOverlay(QMainWindow):
         self._drag_pos = QPoint()
         self.on_mode_change: Optional[Callable] = None
         self.on_close: Optional[Callable] = None
+        # Called when a resume is uploaded: func(resume_text: str, filename: str)
+        self.on_resume_upload: Optional[Callable] = None
 
         self._setup_window()
         self._setup_ui()
@@ -46,7 +48,7 @@ class UIOverlay(QMainWindow):
         self.show()
         self._apply_capture_affinity(hidden=True)
 
-    # ── window chrome ──────────────────────────────────────────────────────────
+    # ── window chrome ─────────────────────────────────────────────────────────��[...] 
 
     def _setup_window(self):
         w = self.settings["window_width"]
@@ -91,6 +93,24 @@ class UIOverlay(QMainWindow):
         self._capture_indicator = QLabel("👁 Hidden from interviewer")
         self._capture_indicator.setStyleSheet("color: #50fa7b; font-size: 9px;")
         tb.addWidget(self._capture_indicator)
+        tb.addSpacing(8)
+
+        # resume indicator + upload button
+        self._resume_label = QLabel("No resume")
+        self._resume_label.setStyleSheet("color:#8be9fd; font-size:9px;")
+        tb.addWidget(self._resume_label)
+        tb.addSpacing(6)
+
+        upload_btn = QPushButton("📎")
+        upload_btn.setFixedSize(28, 22)
+        upload_btn.setToolTip("Upload Resume")
+        upload_btn.setStyleSheet(
+            "QPushButton{background:#2e2e4e;color:#8be9fd;border-radius:4px;"
+            "font-size:10px;font-weight:bold;border:none;padding:0 2px;}"
+            "QPushButton:hover{background:#44475a;color:white;}"
+        )
+        upload_btn.clicked.connect(self._upload_resume)
+        tb.addWidget(upload_btn)
         tb.addSpacing(8)
 
         # font size controls
@@ -283,7 +303,7 @@ class UIOverlay(QMainWindow):
         self.raise_()
         self.activateWindow()
 
-    # ── drag ──────────────────────────────────────────────────────────────────
+    # ── drag ────────────────────────────────────────────────────────────��[...] 
 
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
@@ -296,7 +316,7 @@ class UIOverlay(QMainWindow):
     def mouseReleaseEvent(self, event):
         self._drag_pos = QPoint()
 
-    # ── public API ────────────────────────────────────────────────────────────
+    # ── public API ──────────────────────────────────────────────────────────��[...] 
 
     def log(self, msg: str):
         """Route all status/debug output here instead of terminal."""
@@ -395,8 +415,8 @@ class UIOverlay(QMainWindow):
                 label, rest = s.split(":**", 1)
                 out.append(f"<b style='color:#8be9fd;'>{label[2:]}:</b> {self._inline_code(rest.strip())}")
 
-            elif re.match(r'^\*\*(.+):\*\*', s):
-                s2 = re.sub(r'^\*\*(.+):\*\*', r"<b style='color:#8be9fd;'>\1:</b>", s)
+            elif re.match(r'^\\*\\*(.+):\\*\\*', s):
+                s2 = re.sub(r'^\\*\\*(.+):\\*\\*', r"<b style='color:#8be9fd;'>\\1:</b>", s)
                 out.append(s2)
 
             else:
@@ -426,10 +446,10 @@ class UIOverlay(QMainWindow):
         s = re.sub(r'(&quot;[^&]*?&quot;|\'[^\']*?\')',
                    r"<span style='color:#f1fa8c;'>\1</span>", s)
         # keywords
-        kws = r'\b(def|return|class|import|from|if|else|elif|for|while|in|not|and|or|True|False|None|with|as|try|except|finally|raise|yield|lambda|pass|break|continue|self)\b'
+        kws = r'\\b(def|return|class|import|from|if|else|elif|for|while|in|not|and|or|True|False|None|with|as|try|except|finally|raise|yield|lambda|pass|break|continue|self)\\b'
         s = re.sub(kws, r"<span style='color:#ff79c6;'>\1</span>", s)
         # numbers
-        s = re.sub(r'\b(\d+\.?\d*)\b', r"<span style='color:#bd93f9;'>\1</span>", s)
+        s = re.sub(r'\\b(\d+\.?\d*)\\b', r"<span style='color:#bd93f9;'>\1</span>", s)
         # built-ins / decorators
         s = re.sub(r'(@\w+)', r"<span style='color:#50fa7b;'>\1</span>", s)
         return s
@@ -498,3 +518,33 @@ class UIOverlay(QMainWindow):
 
     def closeEvent(self, event):
         event.ignore()  # X on taskbar does nothing; only red button quits via app.quit()
+
+    # ── Resume upload handling ─────────────────────────────────────────────────
+
+    def _upload_resume(self):
+        try:
+            path, _ = QFileDialog.getOpenFileName(self, "Select resume file", _base_dir(),
+                                                  "Text files (*.txt);;All files (*.*)")
+            if not path:
+                return
+            # Read as text; keep simple for now
+            try:
+                with open(path, "r", encoding="utf-8", errors="replace") as f:
+                    content = f.read()
+            except Exception:
+                # fallback: read bytes and decode
+                with open(path, "rb") as f:
+                    content = f.read().decode("utf-8", errors="replace")
+
+            fname = os.path.basename(path)
+            self.log(f"✓ Resume loaded: {fname} ({len(content)} chars)")
+            self._resume_label.setText(fname)
+            if self.on_resume_upload:
+                # call callback with text and filename
+                try:
+                    self.on_resume_upload(content, fname)
+                except Exception:
+                    pass
+
+        except Exception as e:
+            self.log(f"❌ Resume upload failed: {e}")

@@ -39,6 +39,8 @@ class OpenAIRealtimeClient:
         self.on_answer: Optional[Callable] = None
         self.on_error: Optional[Callable] = None
         self._processing = False  # prevent concurrent API calls
+        # Resume text loaded from UI (optional)
+        self.resume_text: str = ""
 
     async def connect(self):
         token = load_token()
@@ -122,11 +124,20 @@ class OpenAIRealtimeClient:
 
             self._history.append({"role": "user", "content": text})
 
+            # Build messages; include instructions and optionally the resume
+            messages = [{"role": "system", "content": self._instructions}]
+            if self.resume_text:
+                # include a truncated resume snippet to keep payloads reasonable
+                resume_snip = self.resume_text[:3000]
+                messages.append({"role": "system", "content": f"Candidate resume:\n{resume_snip}"})
+
+            messages = messages + self._history[-6:]
+
             response = await self._call_with_retry(
                 self.client.chat.completions.create,
                 model="llama-3.1-8b-instant",
                 max_tokens=700,
-                messages=[{"role": "system", "content": self._instructions}] + self._history[-6:],
+                messages=messages,
             )
             answer = response.choices[0].message.content
             self._history.append({"role": "assistant", "content": answer})

@@ -20,7 +20,7 @@ def _silence_terminal():
     sys.stdout = _null
     sys.stderr = _null
 
-# ── Qt + local imports ────────────────────────────────────────────────────────
+# ── Qt + local imports ───────────────────────────────────────────────────────
 from PyQt6.QtWidgets import QApplication
 from PyQt6.QtCore import QTimer, pyqtSignal, QObject, Qt
 
@@ -39,7 +39,7 @@ class _Bridge(QObject):
     def post(self, func):
         self.call_signal.emit(func)
 
-# ── Frozen-exe path helper ────────────────────────────────────────────────────
+# ── Frozen-exe path helper ───────────────────────────────────────────────────
 def _base_dir() -> str:
     """Root dir: works both when run as .py and as a PyInstaller .exe."""
     if getattr(sys, 'frozen', False):
@@ -101,6 +101,8 @@ class InterviewAssistant:
 
         self.ui.on_mode_change = self._on_mode_change
         self.ui.on_close = self.shutdown
+        # Wire resume upload callback
+        self.ui.on_resume_upload = self._on_resume_upload
 
         self.hotkeys.register_hotkeys({
             "toggle_visibility":   self._toggle_capture_hide,
@@ -225,7 +227,18 @@ class InterviewAssistant:
         self.loop.call_soon_threadsafe(self.loop.stop)
         os._exit(0)
 
-    # ── Main run ──────────────────────────────────────────────────────────────
+    # ── Resume upload handler ─────────────────────────────────────────────────
+
+    def _on_resume_upload(self, text: str, filename: str):
+        # Store resume text in OpenAI client for context. Truncate to 3000 chars to avoid huge payloads.
+        try:
+            truncated = text[:3000]
+            self.openai.resume_text = truncated
+            self.ui.log(f"✓ Resume registered: {filename} ({len(truncated)} chars sent to context)")
+        except Exception as e:
+            self.ui.log(f"❌ Failed to register resume: {e}")
+
+    # ── Main run ───────────────────────────────────────────────────────────�[...] 
 
     async def run(self):
         try:
