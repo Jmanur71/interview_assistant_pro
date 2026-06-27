@@ -77,6 +77,7 @@ class InterviewAssistant:
         self.hotkeys = HotkeyManager()
         self.screen_detector = ScreenShareDetector()
         self.current_question = ""
+        self._screen_task = None
 
         self._setup()
 
@@ -192,7 +193,11 @@ class InterviewAssistant:
 
     def _toggle_voice_input(self):
         if self.audio.is_running:
-            asyncio.run_coroutine_threadsafe(self.audio.stop(), self.loop)
+            try:
+                fut = asyncio.run_coroutine_threadsafe(self.audio.stop(), self.loop)
+                fut.result(timeout=1)
+            except Exception:
+                pass
             self._ui_call(lambda: self.ui.update_status("🔇 Voice paused"))
             self._ui_call(lambda: self.ui.log("🔇 Voice capture paused"))
         else:
@@ -223,6 +228,16 @@ class InterviewAssistant:
         else:
             self._ui_call(lambda: self.ui.log("✓ Screen sharing ended"))
 
+    async def _cancel_screen_task(self):
+        """Cancel the background screen-share monitor task cleanly."""
+        if getattr(self, "_screen_task", None):
+            self._screen_task.cancel()
+            try:
+                await self._screen_task
+            except asyncio.CancelledError:
+                pass
+            self._screen_task = None
+
     def shutdown(self):
         """Stop all background resources then exit gracefully."""
         self.hotkeys.unregister_hotkeys()
@@ -230,6 +245,17 @@ class InterviewAssistant:
             asyncio.run_coroutine_threadsafe(self.audio.stop(), self.loop).result(timeout=2)
         except Exception:
             pass
+
+        # Cancel screen-share monitor task if running
+        try:
+            if getattr(self, "_screen_task", None):
+                try:
+                    asyncio.run_coroutine_threadsafe(self._cancel_screen_task(), self.loop).result(timeout=1)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
         try:
             self.loop.call_soon_threadsafe(self.loop.stop)
         except Exception:
@@ -268,7 +294,7 @@ class InterviewAssistant:
             self._ui_call(lambda: self.ui.log("✓ Audio capture started"))
             self._ui_call(lambda: self.ui.update_status("✓ Ready — speak your question"))
 
-            asyncio.create_task(
+            self._screen_task = asyncio.create_task(
                 self.screen_detector.monitor(self._on_screen_share_change)
             )
 

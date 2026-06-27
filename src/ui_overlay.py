@@ -390,92 +390,80 @@ class UIOverlay(QMainWindow):
         self.set_answer(text)
 
     def _format_answer(self, text: str) -> str:
+        """Format answer with visual structure: bullets, examples, etc. — NO TEXT HEADERS.
+        Parse the response into logical sections and display them cleanly.
+        """
         import re
-        out = []
-        lines = text.split("\n")
+
+        raw = text.strip()
+        raw = re.sub(r"\r\n", "\n", raw)
+        
+        html_parts = []
+        lines = raw.split('\n')
+        
+        current_section = []
         i = 0
+        
         while i < len(lines):
-            s = lines[i].strip()
-
-            # ── multi-line code block ──────────────────────────────────────
-            if s.upper().startswith("CODEBLOCK:"):
-                lang = s[10:].strip() or "code"
+            line = lines[i].strip()
+            
+            # Skip empty lines but track section breaks
+            if not line:
+                if current_section and current_section[0]:  # Has content
+                    html_parts.extend(self._render_section(current_section))
+                    current_section = []
                 i += 1
-                block_lines = []
-                while i < len(lines) and lines[i].strip().upper() != "ENDCODEBLOCK":
-                    block_lines.append(lines[i].rstrip())
-                    i += 1
-                # strip common leading whitespace
-                dedented = self._dedent(block_lines)
-                rows = "".join(
-                    f"<div style='white-space:pre;'>{self._highlight_code(l)}</div>"
-                    for l in dedented
-                )
-                out.append(
-                    f"<div style='background:rgba(30,31,48,0.97);border:1px solid #44475a;"
-                    f"border-radius:6px;padding:8px 12px;margin:6px 0;'>"
-                    f"<div style='color:#6272a4;font-family:Consolas,monospace;font-size:10px;"
-                    f"margin-bottom:4px;'>{lang}</div>"
-                    f"<div style='font-family:Consolas,monospace;font-size:12px;line-height:1.6;'>"
-                    f"{rows}</div></div>"
-                )
-
-            # ── single-line command ────────────────────────────────────────
-            elif s.upper().startswith("CODE:"):
-                code = s[5:].strip()
-                out.append(
-                    f"<div style='background:rgba(40,42,54,0.9);border-left:3px solid #ff79c6;"
-                    f"border-radius:4px;padding:4px 10px;margin:3px 0;'>"
-                    f"<span style='color:#ff79c6;font-family:Consolas,monospace;font-size:12px;'>$ </span>"
-                    f"<span style='color:#f1fa8c;font-family:Consolas,monospace;font-size:12px;'>{code}</span>"
+                continue
+            
+            # Bullet point detection
+            if line.startswith(('•', '-', '*')):
+                content = re.sub(r'^[•\-\*]\s*', '', line)
+                html_parts.append(f"<div style='margin-left:12px;margin-bottom:3px;color:#f8f8f2;font-size:12px;'>• {self._inline_code(content)}</div>")
+            
+            # CODE: example
+            elif line.startswith('CODE:'):
+                code = re.sub(r'^CODE:\s*', '', line)
+                html_parts.append(
+                    f"<div style='background:rgba(40,42,54,0.9);border-left:3px solid #ff79c6;border-radius:4px;padding:6px 10px;margin:4px 0;'>"
+                    f"<span style='color:#ff79c6;font-family:Consolas,monospace;font-size:11px;'>$ </span>"
+                    f"<span style='color:#f1fa8c;font-family:Consolas,monospace;font-size:11px;'>{self._inline_code(code)}</span>"
                     f"</div>"
                 )
-
-            # ── tip line ───────────────────────────────────────────────────
-            elif s.upper().startswith("TIP:"):
-                tip = s[4:].strip()
-                out.append(
-                    f"<div style='margin-top:6px;padding:4px 8px;border-radius:4px;"
-                    f"background:rgba(80,250,123,0.08);border-left:3px solid #50fa7b;'>"
-                    f"<span style='color:#50fa7b;font-size:11px;'>💡 {tip}</span></div>"
-                )
-
-            elif not s:
-                out.append("")
-
-            elif s.startswith("* ") or s.startswith("- "):
-                content = self._inline_code(s[2:].strip())
-                # Check for definition pattern: **Term** is: description
-                import re as _re
-                m = _re.match(r"<b style='color:#8be9fd;'>(.+?)</b>\s*(?:is:?|-)\s*(.*)", content)
-                if m:
-                    out.append(
-                        f"<div style='margin:3px 0 3px 8px;padding:4px 8px;"
-                        f"border-left:2px solid #6272a4;border-radius:0 4px 4px 0;'>"
-                        f"<b style='color:#8be9fd;'>{m.group(1)}</b>"
-                        f"<span style='color:#6272a4;'> — </span>"
-                        f"<span style='color:#f8f8f2;'>{m.group(2)}</span></div>"
-                    )
-                else:
-                    out.append(f"&nbsp;&nbsp;<span style='color:#50fa7b;'>&#9679;</span> {content}")
-
-            elif s.startswith("**") and s.endswith("**"):
-                out.append(f"<b style='color:#8be9fd;'>{s[2:-2]}</b>")
-
-            elif s.startswith("**") and ":**" in s:
-                label, rest = s.split(":**", 1)
-                out.append(f"<b style='color:#8be9fd;'>{label[2:]}:</b> {self._inline_code(rest.strip())}")
-
-            elif re.match(r'^\\*\\*(.+):\\*\\*', s):
-                s2 = re.sub(r'^\\*\\*(.+):\\*\\*', r"<b style='color:#8be9fd;'>\\1:</b>", s)
-                out.append(s2)
-
+            
+            # Regular paragraph text
             else:
-                out.append(self._inline_code(s))
-
+                if current_section:
+                    current_section.append(line)
+                else:
+                    current_section = [line]
+            
             i += 1
+        
+        # Process any remaining section
+        if current_section and current_section[0]:
+            html_parts.extend(self._render_section(current_section))
+        
+        # Wrap in container with proper spacing
+        return f"<div style='color:#f8f8f2;font-size:12px;line-height:1.5;'>{chr(10).join(html_parts)}</div>"
+    
+    def _render_section(self, lines: list) -> list:
+        """Render a paragraph section as plain text with inline code formatting."""
+        text = " ".join(lines).strip()
+        if not text:
+            return []
+        formatted = self._inline_code(text)
+        return [f"<div style='margin-bottom:6px;color:#f8f8f2;font-size:12px;line-height:1.5;'>{formatted}</div>"]
 
-        return "<br>".join(out)
+    def _format_inline_code_row(self, ex: str) -> str:
+        """Render a single-line example as CODE: row (used by _format_answer)."""
+        code = ex.strip()
+        return (
+            f"<div style='background:rgba(40,42,54,0.9);border-left:3px solid #ff79c6;"
+            f"border-radius:4px;padding:4px 8px;margin:2px 0;'>"
+            f"<span style='color:#ff79c6;font-family:Consolas,monospace;font-size:12px;'>$ </span>"
+            f"<span style='color:#f1fa8c;font-family:Consolas,monospace;font-size:12px;'>{self._inline_code(code)}</span>"
+            f"</div>"
+        )
 
     @staticmethod
     def _dedent(lines: list) -> list:

@@ -5,6 +5,7 @@ import base64
 import io
 import re
 import wave
+import time
 from typing import Callable, Optional
 import numpy as np
 from groq import AsyncGroq
@@ -21,22 +22,24 @@ class OpenAIRealtimeClient:
         self._capture_sample_rate: int = 16000
         self._capture_channels: int = 1
         self._instructions = (
-            "You are a technical interview coach. Answer in EXACTLY 80-150 words.\n\n"
-            "MANDATORY STRUCTURE:\n"
-            "1. **Direct Answer** (1 sentence max) - Be specific, not vague.\n"
-            "2. **3 Key Points** (bullet format) - Essential facts only.\n"
-            "3. **Example** - ONE command or real-world fact.\n"
-            "4. **Why It Matters** (1 sentence) - Business value.\n\n"
-            "ABSOLUTE RULES:\n"
-            "- MAXIMUM 150 words total - count them!\n"
-            "- No long explanations, only facts\n"
-            "- No markdown backticks\n"
-            "- Use 'CODE: command' for single-line examples\n"
-            "- Use bullet points with '-' (max 3)\n"
-            "- Answer the EXACT question asked, nothing else\n"
-            "- Be concise, be direct, be interview-ready\n\n"
-            "TONE: Professional, confident, accurate.\n"
-            "WORD LIMIT: 80-150 words maximum."
+            "You are a technical interview coach. Prioritize factual accuracy, clarity, and realistic examples.\n\n"
+            "CRITICAL: Output ONLY raw text — NO SECTION HEADERS/LABELS.\n\n"
+            "FORMAT (no labels, just structure naturally):\n"
+            "1. Direct answer (1-2 sentences)\n\n"
+            "2. Key points (use • or - for bullets):\n"
+            "• Point 1\n"
+            "• Point 2\n"
+            "• Point 3\n\n"
+            "3. Example:\n"
+            "CODE: <command or code>\n\n"
+            "4. Why it matters (1 sentence)\n\n"
+            "RULES:\n"
+            "- NEVER write 'Direct Answer:', 'Key Points:', 'Why It Matters:' or any section labels\n"
+            "- Use • or - for bullets\n"
+            "- Use 'CODE: <command>' for examples (no markdown backticks)\n"
+            "- Total response: strictly under 100 words\n"
+            "- Never invent facts — state uncertainty if unsure\n\n"
+            "TONE: Professional, direct, confident."
         )
         self._history: list[dict] = []
         self.on_transcription: Optional[Callable] = None
@@ -45,6 +48,9 @@ class OpenAIRealtimeClient:
         self._processing = False  # prevent concurrent API calls
         # Resume text loaded from UI (optional)
         self.resume_text: str = ""
+        # Simple dedupe for repeated transcriptions
+        self._last_transcription_text: str = ""
+        self._last_transcription_ts: float = 0.0
 
     async def connect(self):
         token = load_token()
@@ -97,12 +103,12 @@ class OpenAIRealtimeClient:
                 else:
                     raise
 
-    def _truncate_answer(self, answer: str, max_words: int = 200) -> str:
+    def _truncate_answer(self, answer: str, max_words: int = 100) -> str:
         """Truncate answer to max word count if it exceeds limits."""
         words = answer.split()
         if len(words) > max_words:
             truncated = " ".join(words[:max_words])
-            truncated = truncated.rstrip(",;:") + " [truncated]"
+            truncated = truncated.rstrip(",;:") + " [...]"
             return truncated
         return answer
 
@@ -128,9 +134,22 @@ class OpenAIRealtimeClient:
             )
             text = transcript.text.strip()
 
+            # Basic filtering
             words = text.split()
             if not text or len(words) < 2 or len(text) < 8:
                 return
+
+            # Deduplicate near-identical transcriptions to avoid repeated triggers
+            now = time.time()
+            norm_new = re.sub(r"\s+", " ", text.lower()).strip()
+            norm_last = re.sub(r"\s+", " ", self._last_transcription_text.lower()).strip()
+            if norm_last and norm_new == norm_last and (now - self._last_transcription_ts) < 30:
+                # Skip duplicate transcription within 30 seconds
+                return
+
+            # Remember last transcription
+            self._last_transcription_text = text
+            self._last_transcription_ts = now
 
             if self.on_transcription:
                 await self.on_transcription(text)
@@ -148,13 +167,13 @@ class OpenAIRealtimeClient:
             response = await self._call_with_retry(
                 self.client.chat.completions.create,
                 model="llama-3.1-8b-instant",
-                max_tokens=200,
+                max_tokens=130,
                 messages=messages,
             )
             answer = response.choices[0].message.content
             
-            # Truncate answer if it exceeds word limit
-            answer = self._truncate_answer(answer, max_words=160)
+            # Truncate answer to enforce strict 100-word limit
+            answer = self._truncate_answer(answer, max_words=100)
             
             self._history.append({"role": "assistant", "content": answer})
             if len(self._history) > 20:
