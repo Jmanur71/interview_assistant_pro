@@ -33,6 +33,7 @@ class UIOverlay(QMainWindow):
 
         self.answer_text = ""
         self.transcription_text = ""
+        self._answer_history = []  # Keep separate history of answers
         self._hidden_from_capture = True
         self._collapsed = False
         self._expanded_height = None
@@ -165,7 +166,7 @@ class UIOverlay(QMainWindow):
             "QPushButton{background:#ff5f56;color:rgba(0,0,0,0);border-radius:8px;font-size:9px;font-weight:bold;border:none;}"
             "QPushButton:hover{background:#ff3b30;color:rgba(0,0,0,180);}"
         )
-        close_btn.clicked.connect(lambda: self.on_close() if self.on_close else QApplication.instance().quit())
+        close_btn.clicked.connect(self._handle_close_button)
         tb.addWidget(close_btn)
 
         min_btn = QPushButton("–")
@@ -337,18 +338,39 @@ class UIOverlay(QMainWindow):
         self._log_box.moveCursor(QTextCursor.MoveOperation.End)
 
     def set_transcription(self, text: str):
+        """Show the user's question - will auto-clear when answer appears."""
         if self.settings.get("show_transcription", True):
             self.transcription_text = text
             self.transcription_label.setText(f"❓ {text}")
 
+    def _clear_transcription_if_unchanged(self, original_text: str):
+        """Clear transcription if no new transcription has appeared."""
+        if self.transcription_text == original_text:
+            self.transcription_text = ""
+            self.transcription_label.setText("")
+
     def set_answer(self, text: str):
-        # Preserve previous answers: append new answer separated by a divider
-        if self.answer_text:
-            self.answer_text = self.answer_text + "\n\n---\n\n" + text
+        """Display a new answer - replaces previous answer, keeps history below with separator."""
+        # Clear transcription when showing answer
+        self.transcription_text = ""
+        self.transcription_label.setText("")
+        
+        # Store new answer
+        self.answer_text = text
+        self._answer_history.append(text)
+        
+        # Keep only last 5 answers to avoid excessive scrollback
+        if len(self._answer_history) > 5:
+            self._answer_history = self._answer_history[-5:]
+        
+        # Display answer with history separator if applicable
+        if len(self._answer_history) > 1:
+            display_text = "\n\n".join([f"Q{i+1}:\n{a}" for i, a in enumerate(self._answer_history)])
         else:
-            self.answer_text = text
-        # Render the full answer history
-        self.answer_box.setHtml(self._format_answer(self.answer_text))
+            display_text = self.answer_text
+            
+        self.answer_box.setHtml(self._format_answer(display_text))
+        
         # Scroll to the bottom to show the latest answer
         try:
             self.answer_box.verticalScrollBar().setValue(self.answer_box.verticalScrollBar().maximum())
@@ -538,22 +560,22 @@ class UIOverlay(QMainWindow):
 
     def closeEvent(self, event):
         """Handle window close (title-bar X). Delegate to registered on_close if provided for graceful shutdown."""
+        self._handle_close_button()
+        event.accept()
+
+    def _handle_close_button(self):
+        """Handle close button press - ensures graceful shutdown."""
         try:
             if self.on_close:
-                try:
-                    self.on_close()
-                except Exception:
-                    pass
-                event.accept()
+                self.on_close()
                 return
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"Error in on_close callback: {e}", file=sys.stderr)
         # Fallback: quit the application
         try:
             QApplication.instance().quit()
         except Exception:
             pass
-        event.accept()
 
     # ── Resume upload handling ─────────────────────────────────────────────────
 
